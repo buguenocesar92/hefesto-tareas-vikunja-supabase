@@ -1,0 +1,5 @@
+services:
+  app:
+    ports: ["127.0.0.1:8095:3456"]
+    environment:
+      VIKUNJA_SERVICE_PUBLICURL: http://localhost:8095/

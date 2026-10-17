@@ -1,0 +1,75 @@
+name: hefesto-tareas
+x-pg: &pg
+  PGHOST: ${DB_HOST:?Configurar DB_HOST}
+  PGPORT: "5432"
+  PGDATABASE: postgres
+  PGUSER: ${DB_USER:-vikunja_app}
+  PGPASSWORD: ${DB_PASSWORD:?Configurar clave}
+  PGSSLMODE: verify-full
+  PGSSLROOTCERT: /certs/ca.crt
+  PGCONNECT_TIMEOUT: "15"
+services:
+  preflight:
+    image: postgres:17-alpine
+    restart: "no"
+    environment:
+      <<: *pg
+      SUPABASE_DEDICATED_CONFIRMED: ${SUPABASE_DEDICATED_CONFIRMED:-false}
+      SUPABASE_DATA_API_DISABLED: ${SUPABASE_DATA_API_DISABLED:-false}
+    volumes:
+      - ./certs:/certs:ro
+      - ./ops:/opt/hefesto:ro
+    entrypoint: [sh, /opt/hefesto/preflight.sh]
+  permissions:
+    image: postgres:17-alpine
+    restart: "no"
+    user: "0"
+    entrypoint: [sh, -ec, 'chown -R 1000:1000 /files; chmod 700 /files']
+    volumes:
+      - files:/files
+  app:
+    image: vikunja/vikunja:2.7.0@sha256:e2204a1c1c6a81e833c2b3a5442be182ca2335b54c2e7e37578cc3fe12a27cfc
+    restart: unless-stopped
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
+      permissions:
+        condition: service_completed_successfully
+    environment:
+      VIKUNJA_SERVICE_PUBLICURL: ${PUBLIC_URL:?Configurar URL HTTPS}
+      VIKUNJA_SERVICE_SECRET: ${SERVICE_SECRET:?Configurar secreto}
+      VIKUNJA_SERVICE_ENABLEREGISTRATION: "false"
+      VIKUNJA_SERVICE_ENABLELINKSHARING: "false"
+      VIKUNJA_MAILER_ENABLED: "false"
+      VIKUNJA_DATABASE_TYPE: postgres
+      VIKUNJA_DATABASE_HOST: ${DB_HOST}:5432
+      VIKUNJA_DATABASE_USER: ${DB_USER:-vikunja_app}
+      VIKUNJA_DATABASE_PASSWORD: ${DB_PASSWORD}
+      VIKUNJA_DATABASE_DATABASE: postgres
+      VIKUNJA_DATABASE_SCHEMA: public
+      VIKUNJA_DATABASE_SSLMODE: verify-full
+      VIKUNJA_DATABASE_SSLROOTCERT: /certs/ca.crt
+      VIKUNJA_DATABASE_MAXOPENCONNECTIONS: "5"
+      VIKUNJA_DATABASE_MAXIDLECONNECTIONS: "2"
+      VIKUNJA_FILES_BASEPATH: /app/vikunja/files
+      VIKUNJA_DEFAULTSETTINGS_TIMEZONE: America/Santiago
+    expose: ["3456"]
+    volumes:
+      - files:/app/vikunja/files
+      - ./certs:/certs:ro
+  dbtools:
+    image: postgres:17-alpine
+    profiles: [tools]
+    environment: *pg
+    volumes:
+      - ./certs:/certs:ro
+      - ./ops:/opt/hefesto:ro
+  filetools:
+    image: postgres:17-alpine
+    profiles: [tools]
+    user: "0"
+    volumes:
+      - files:/files
+volumes:
+  files:
+    name: ${VOLUME_PREFIX:-hefesto-tareas}-files

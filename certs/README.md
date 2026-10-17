@@ -1,0 +1,1 @@
+Descargue el certificado CA del proyecto Supabase desde su panel y guárdelo como ca.crt aquí. Debe ser legible por UID 1000 (0644, carpeta 0755). No se incluye un certificado ficticio. No desactive verify-full para sortear errores: compruebe host, cadena de confianza y vigencia.
