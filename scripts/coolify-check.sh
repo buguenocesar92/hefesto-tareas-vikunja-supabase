@@ -41,9 +41,11 @@ escribir_env() {
     printf "SUPABASE_DATA_API_DISABLED=true\n" >> "$destino"
     # Para supabase-pg el chequeo exige ver DB_NAME=mvp_prueba y DB_SSLMODE=disable.
     if [ "$BD_TIPO" = "supabase-pg" ]; then
-        printf "DB_NAME=mvp_prueba\n" >> "$destino"
-        printf "DB_SSLMODE=disable\n" >> "$destino"
-        printf "DB_USER=%s\n" "$DUMMY" >> "$destino"
+        {
+            printf "DB_NAME=mvp_prueba\n"
+            printf "DB_SSLMODE=disable\n"
+            printf "DB_USER=%s\n" "$DUMMY"
+        } >> "$destino"
     fi
 }
 
@@ -130,18 +132,15 @@ principal() {
         error "jq no esta instalado"; exit 1
     fi
 
-    local tmp
     tmp="$(mktemp "${TMPDIR:-/tmp}/coolify-check.XXXXXX")"
-    trap 'rm -f "$tmp"' EXIT
+    # La trap de EXIT sobrevive a la salida de principal(); tmp debe ser global.
 
     escribir_env "$tmp"
 
-    local renderizado rc
+    local renderizado
     # docker compose emite WARNING a stderr (config.json del daemon). Los descartamos.
-    renderizado="$(docker compose --project-directory "$RAIZ" \
-        -f "$COMPOSE" --env-file "$tmp" config --format json 2>/dev/null)"
-    rc=$?
-    if [ "$rc" -ne 0 ]; then
+    if ! renderizado="$(docker compose --project-directory "$RAIZ" \
+            -f "$COMPOSE" --env-file "$tmp" config --format json 2>/dev/null)"; then
         # Si fallo, mostramos el error completo para diagnosticar.
         docker compose --project-directory "$RAIZ" \
             -f "$COMPOSE" --env-file "$tmp" config --format json >&2 || true
@@ -149,11 +148,14 @@ principal() {
         exit 1
     fi
 
-    if ! violations="$(revisar_sin_profiles "$renderizado")"; then
+    # revisar_sin_profiles devuelve 0 con violaciones o 1 sin ellas; lo que importa es el texto.
+    local violations=()
+    # shellcheck disable=SC2207 # array intencional; las lineas no contienen globs.
+    if violations=($(revisar_sin_profiles "$renderizado" 2>/dev/null || true)); then
         :
     fi
-    if [ -n "${violations:-}" ]; then
-        printf '%s\n' "$violations" >&2
+    if [ "${#violations[@]}" -gt 0 ]; then
+        printf '%s\n' "${violations[@]}" >&2
         error "compose expone superficies prohibidas por Traefik/Coolify"
         exit 1
     fi
