@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Docker cerrado: solo fixtures; captura stdin, nunca ejecuta Docker."""
+import json
+import os
+from pathlib import Path
+import sys
+import tarfile
+
+if os.environ.get("HEFESTO_KIT_TEST") != "1":
+    sys.exit(97)
+a = sys.argv[1:]
+if not a or a[0] != "compose":
+    sys.exit(97)
+a = a[1:]
+entry = a[a.index("--entrypoint") + 1] if "--entrypoint" in a else ""
+cmd = a[0] if a else ""
+text = " ".join(a)
+if cmd in ("ps", "stop", "start"):
+    op = cmd
+elif cmd == "exec" and "mysqldump" in text:
+    op = "dump"
+elif cmd == "exec" and "information_schema.tables" in text:
+    op = "dbcount"
+elif cmd == "exec" and "exec mysql " in text:
+    op = "restoredb"
+elif cmd == "run" and entry == "pg_dump":
+    op = "dump"
+elif cmd == "run" and entry == "psql":
+    op = "dbcount"
+elif cmd == "run" and entry == "pg_restore":
+    op = "toc" if "--list" in a else "restoredb"
+elif cmd == "run" and entry == "tar":
+    op = "archive" if "-czf" in a else "restorefiles" if "-xzf" in a else "UNKNOWN"
+elif cmd == "run" and entry == "find":
+    op = "find"
+elif cmd == "run" and a[-1:] == ["permissions"]:
+    op = "permissions"
+else:
+    op = "UNKNOWN"
+if op == "UNKNOWN":
+    print("docker stub: operacion no permitida", file=sys.stderr)
+    sys.exit(97)
+with Path(os.environ["STUB_TRACE"]).open("a") as out:
+    out.write(json.dumps({"op": op}) + "\n")
+if os.environ.get("STUB_FAIL") == op:
+    print("fallo sintetico: " + op, file=sys.stderr)
+    sys.exit(42)
+state = Path(os.environ["STUB_STATE_FILE"])
+if op == "ps":
+    if os.environ.get("STUB_RUNNING") == "1" and not state.read_text():
+        print("dummy-container")
+elif op == "stop":
+    state.write_text("app\n")
+elif op == "start":
+    state.write_text("")
+elif op == "dump":
+    sys.stdout.buffer.write(Path(os.environ["STUB_DUMP_FILE"]).read_bytes())
+elif op == "archive":
+    with tarfile.open(fileobj=sys.stdout.buffer, mode="w|gz") as tf:
+        tf.add(os.environ["STUB_TAR_DIR"], arcname=".")
+elif op == "dbcount":
+    print(os.environ.get("STUB_PSQL_OUT", "0"))
+elif op == "find":
+    print(os.environ.get("STUB_FIND_OUTPUT", ""))
+elif op == "toc":
+    sys.stdin.buffer.read()
+    print("1; 2615 2200 SCHEMA - public postgres\n2; 1259 42 TABLE public demo postgres")
+elif op in ("restoredb", "restorefiles"):
+    capture = Path(os.environ["STUB_CAPTURE"])
+    if entry == "pg_restore":
+        if "--exit-on-error" not in a or "--use-list=/restore/restore.list" not in a:
+            sys.exit(97)
+        mount = a[a.index("-v") + 1].split(":")[0]
+        toc = (Path(mount) / "restore.list").read_text()
+        if "SCHEMA - public" in toc:
+            sys.exit(97)
+        (capture / "restore.list").write_text(toc)
+    (capture / (op + ".bin")).write_bytes(sys.stdin.buffer.read())

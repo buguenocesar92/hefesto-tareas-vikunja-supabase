@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main, coolify, 'plan/**', 'feature/**', 'bugfix/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validacion:
+    name: Compose, sintaxis, pruebas y secretos
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar bats, jq, age y gitleaks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bats jq age shellcheck
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz | tar xz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      - name: El compose renderiza con el .env de ejemplo
+        run: |
+          docker compose --env-file .env.example -f compose.yaml config --quiet
+          docker compose --env-file .env.example -f compose.yaml -f compose.bootstrap.yaml config --quiet
+
+      - name: Sintaxis de los scripts
+        run: |
+          python3 -m py_compile scripts/*.py
+          find scripts -name '*.sh' -print0 | xargs -0 -r shellcheck -S warning -x
+          find scripts ops -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
+
+      - name: Suite bats (Docker simulado, age efimero)
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          shellcheck -s bash tests/ayudante.bash
+          bash -n tests/ayudante.bash
+          bats tests/
+
+      - name: Buscar secretos en el historico
+        run: gitleaks detect --source . --no-banner --redact
+
+  trivy:
+    name: Analisis de vulnerabilidades y secretos
+    runs-on: ubuntu-24.04
+    needs: validacion
+    steps:
+      - uses: actions/checkout@v4
+      - name: Analizar el repositorio
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: repo
+          scan-ref: .
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
