@@ -1,11 +1,10 @@
-name: hefesto-tareas
 x-pg: &pg
   PGHOST: ${DB_HOST:?Configurar DB_HOST}
   PGPORT: "5432"
-  PGDATABASE: postgres
+  PGDATABASE: ${DB_NAME:-postgres}
   PGUSER: ${DB_USER:-vikunja_app}
   PGPASSWORD: ${DB_PASSWORD:?Configurar clave}
-  PGSSLMODE: verify-full
+  PGSSLMODE: ${DB_SSLMODE:-verify-full}
   PGSSLROOTCERT: /certs/ca.crt
   PGCONNECT_TIMEOUT: "15"
 services:
@@ -45,9 +44,9 @@ services:
       VIKUNJA_DATABASE_HOST: ${DB_HOST}:5432
       VIKUNJA_DATABASE_USER: ${DB_USER:-vikunja_app}
       VIKUNJA_DATABASE_PASSWORD: ${DB_PASSWORD}
-      VIKUNJA_DATABASE_DATABASE: postgres
+      VIKUNJA_DATABASE_DATABASE: ${DB_NAME:-postgres}
       VIKUNJA_DATABASE_SCHEMA: public
-      VIKUNJA_DATABASE_SSLMODE: verify-full
+      VIKUNJA_DATABASE_SSLMODE: ${DB_SSLMODE:-verify-full}
       VIKUNJA_DATABASE_SSLROOTCERT: /certs/ca.crt
       VIKUNJA_DATABASE_MAXOPENCONNECTIONS: "5"
       VIKUNJA_DATABASE_MAXIDLECONNECTIONS: "2"
