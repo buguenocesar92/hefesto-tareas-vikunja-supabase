@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import datetime
 from contextlib import contextmanager
+import errno
 import hashlib
 import json
 import os
@@ -192,20 +193,38 @@ def cifrar_con_age(productor, destino, receptor):
     """Cifra con age la salida de un productor.
 
     productor recibe el flujo de entrada: el texto plano nunca se escribe en
-    disco, va directo del productor al cifrador.
+    disco, va directo del productor al cifrador. El destino no se escribe
+    siguiendo un enlace simbolico, igual que el .env: un enlace permitiria
+    cifrar sobre un fichero de otro servicio sin que nadie lo notase.
     """
     if shutil.which("age") is None:
         raise RespaldoError("age no esta disponible y hay receptor configurado: "
                             "no hay modo degradado en claro", 5)
-    with open(destino, "wb") as salida:
-        proceso = subprocess.Popen(["age", "-r", receptor], stdin=subprocess.PIPE, stdout=salida)
-        try:
-            productor(proceso.stdin)
-        finally:
+    destino = Path(destino)
+    if destino.is_symlink():
+        raise RespaldoError("No se escribe sobre un enlace simbolico: " + str(destino), 2)
+    # O_NOFOLLOW: el cifrado nunca aterriza en el destino de un enlace, ni
+    # siquiera si el enlace se colase entre la comprobacion y la apertura.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(destino, flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise RespaldoError("No se escribe sobre un enlace simbolico: " + str(destino), 2) from exc
+        raise RespaldoError("No se pudo abrir el destino cifrado: " + str(destino), 5) from exc
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as salida:
+            proceso = subprocess.Popen(["age", "-r", receptor], stdin=subprocess.PIPE, stdout=salida)
             try:
-                proceso.stdin.close()
+                productor(proceso.stdin)
             finally:
-                codigo = proceso.wait()
+                try:
+                    proceso.stdin.close()
+                finally:
+                    codigo = proceso.wait()
+    except OSError as exc:
+        raise RespaldoError("No se pudo cifrar el volumen sensible", 5) from exc
     if codigo != 0:
         raise RespaldoError("age no pudo cifrar el volumen sensible", 5)
 
@@ -308,8 +327,15 @@ def verificar_checksums(destino, manifiesto=None, esperados=()):
     return manifiesto
 
 
-def verificar_cobertura(destino, manifiesto):
-    """El manifiesto debe cubrir exactamente los archivos presentes en el respaldo."""
+def verificar_cobertura(destino, manifiesto, permitir_informe_no_declarado=False):
+    """El manifiesto debe cubrir exactamente los archivos presentes en el respaldo.
+
+    El informe de restauracion se escribe DESPUES del manifiesto (al restaurar),
+    asi que un respaldo recien restaurado lo tiene sin declarar. El camino de
+    restauracion lo tolera porque es su propio informe; al verificar cualquier
+    otro respaldo, un restore-report.json que el manifiesto no declara es
+    contenido que el manifiesto no dice, y se rechaza.
+    """
     destino = Path(destino)
     declarados = set(manifiesto.get("sha256") or {})
     reales = set()
@@ -319,8 +345,14 @@ def verificar_cobertura(destino, manifiesto):
         if not p.is_file():
             continue
         relativa = str(p.relative_to(destino))
-        if relativa in ("manifest.json", "restore-report.json"):
+        if relativa == "manifest.json":
             continue
+        if relativa == "restore-report.json" and relativa not in declarados:
+            if permitir_informe_no_declarado:
+                continue
+            raise RespaldoError("El respaldo contiene un restore-report.json que el manifiesto "
+                                "no declara: el manifiesto tiene que declarar el contenido del "
+                                "respaldo", 2)
         reales.add(relativa)
     if declarados != reales:
         faltantes = sorted(reales - declarados)
@@ -347,7 +379,7 @@ def detectar_secreto_en_claro(destino):
 
 
 def ejecutar_check(destino, software, version, database, esperados, prohibidos=(),
-                   requeridos=(), excluibles=()):
+                   requeridos=(), excluibles=(), permitir_informe_no_declarado=False):
     """Verificacion completa de un respaldo. Lanza RespaldoError con su codigo.
 
     esperados: artefactos que produce el kit. Cada uno tiene que estar en el
@@ -356,6 +388,8 @@ def ejecutar_check(destino, software, version, database, esperados, prohibidos=(
     requeridos: artefactos que ademas no pueden estar vacios.
     excluibles: {clave del manifiesto: artefacto} que puede faltar solo si el
       manifiesto declara esa exclusion en "excluidos".
+    permitir_informe_no_declarado: lo usa el camino de restauracion, que
+      escribe su informe despues del manifiesto y todavia no puede declararlo.
     prohibidos: nombres de archivo que no pueden estar en claro en el respaldo
     (por ejemplo el volumen de configuracion de un servicio con token de API).
     """
@@ -390,7 +424,8 @@ def ejecutar_check(destino, software, version, database, esperados, prohibidos=(
         raise RespaldoError("El manifiesto no declara los artefactos obligatorios: "
                             + ", ".join(faltan) + " (y no declara su exclusion)", 2)
     verificar_checksums(destino, manifiesto, obligatorios)
-    verificar_cobertura(destino, manifiesto)
+    verificar_cobertura(destino, manifiesto,
+                        permitir_informe_no_declarado=permitir_informe_no_declarado)
     for nombre in requeridos:
         if nombre not in declarados:
             raise RespaldoError("Falta artefacto requerido: " + nombre, 2)
@@ -443,14 +478,34 @@ def opciones_restore(argv):
 
 
 def auditar(root, **campos):
-    """Registro append-only de actividades de tratamiento (nunca valores de secretos)."""
+    """Registro append-only de actividades de tratamiento (nunca valores de secretos).
+
+    Ni el directorio de logs ni el log son enlaces simbolicos: un enlace
+    permitiria dejar el rastro de auditoria fuera del kit o sobre un fichero de
+    otro servicio. El log se abre con O_NOFOLLOW|O_APPEND, de modo que el rastro
+    sigue siendo append-only y nunca aterriza en el destino del enlace.
+    """
     logs = Path(root) / "logs"
+    if logs.is_symlink():
+        raise RespaldoError("No se audita sobre un enlace simbolico: " + str(logs), 2)
     logs.mkdir(parents=True, exist_ok=True)
-    registro = {"ts": ahora(), **campos}
     destino = logs / "restore.log"
-    with destino.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(registro, ensure_ascii=False) + "\n")
-    os.chmod(destino, 0o600)
+    if destino.is_symlink():
+        raise RespaldoError("No se audita sobre un enlace simbolico: " + str(destino), 2)
+    registro = {"ts": ahora(), **campos}
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(destino, flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise RespaldoError("No se audita sobre un enlace simbolico: " + str(destino), 2) from exc
+        raise RespaldoError("No se pudo abrir el registro de auditoria: " + str(destino), 2) from exc
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as f:
+            f.write(json.dumps(registro, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        raise RespaldoError("No se pudo escribir el registro de auditoria: " + str(destino), 2) from exc
 
 
 def escribir_informe(carpeta, **campos):

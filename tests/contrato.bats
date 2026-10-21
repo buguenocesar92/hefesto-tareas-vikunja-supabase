@@ -108,3 +108,39 @@ setup() {
   run python3 "$RAIZ/tests/contrato_test.py" TarHostil.test_acepta_tar_limpio
   [ "$status" -eq 0 ]
 }
+
+@test "contrato: la auditoria rechaza un enlace en el log" {
+  run python3 "$RAIZ/tests/contrato_test.py" \
+    ResiduosCierre.test_auditoria_rechaza_enlace_en_el_log
+  [ "$status" -eq 0 ]
+}
+
+@test "contrato: la auditoria rechaza un enlace en el directorio de logs" {
+  run python3 "$RAIZ/tests/contrato_test.py" \
+    ResiduosCierre.test_auditoria_rechaza_enlace_en_el_directorio_de_logs
+  [ "$status" -eq 0 ]
+}
+
+@test "contrato: la auditoria anade al log sin romper el formato" {
+  run python3 "$RAIZ/tests/contrato_test.py" \
+    ResiduosCierre.test_auditoria_anade_al_log_sin_romper_el_formato
+  [ "$status" -eq 0 ]
+}
+
+@test "contrato: el cifrado rechaza un enlace en el destino" {
+  run python3 "$RAIZ/tests/contrato_test.py" \
+    ResiduosCierre.test_cifrar_con_age_rechaza_enlace_en_el_destino
+  [ "$status" -eq 0 ]
+}
+
+@test "contrato: la verificacion rechaza un informe no declarado" {
+  run python3 "$RAIZ/tests/contrato_test.py" \
+    ResiduosCierre.test_verificacion_rechaza_un_informe_no_declarado
+  [ "$status" -eq 0 ]
+}
+
+@test "contrato: el informe se puede escribir tras la restauracion" {
+  run python3 "$RAIZ/tests/contrato_test.py" \
+    ResiduosCierre.test_el_informe_se_puede_escribir_tras_la_restauracion
+  [ "$status" -eq 0 ]
+}
