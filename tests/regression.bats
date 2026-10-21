@@ -31,6 +31,21 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "regresion env_multiline" {
+  run python3 "$RAIZ/tests/regression.py" env_multiline
+  [ "$status" -eq 0 ]
+}
+
+@test "regresion dump_encrypted" {
+  run python3 "$RAIZ/tests/regression.py" dump_encrypted
+  [ "$status" -eq 0 ]
+}
+
+@test "regresion dump_clear" {
+  run python3 "$RAIZ/tests/regression.py" dump_clear
+  [ "$status" -eq 0 ]
+}
+
 @test "regresion missing_dump" {
   run python3 "$RAIZ/tests/regression.py" missing_dump
   [ "$status" -eq 0 ]
@@ -38,6 +53,21 @@ setup() {
 
 @test "regresion empty_dump" {
   run python3 "$RAIZ/tests/regression.py" empty_dump
+  [ "$status" -eq 0 ]
+}
+
+@test "regresion solo_env_vars" {
+  run python3 "$RAIZ/tests/regression.py" solo_env_vars
+  [ "$status" -eq 0 ]
+}
+
+@test "regresion missing_volume" {
+  run python3 "$RAIZ/tests/regression.py" missing_volume
+  [ "$status" -eq 0 ]
+}
+
+@test "regresion report_symlink" {
+  run python3 "$RAIZ/tests/regression.py" report_symlink
   [ "$status" -eq 0 ]
 }
 

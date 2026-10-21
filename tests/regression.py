@@ -11,7 +11,8 @@ import tarfile
 
 kit = Path(os.environ["KIT"])
 ghost = (kit / "scripts/restore.py").exists()
-dump = "ghost.sql" if ghost else "public.dump"
+dump = "ghost.sql.age" if ghost else "public.dump.age"
+dump_en_claro = "ghost.sql" if ghost else "public.dump"
 archive = "content.tar.gz.age" if ghost else "files.tar.gz.age"
 restore = "restore.py" if ghost else "restore_files.py"
 dbrestore = "restore.py" if ghost else "restore_db.py"
@@ -45,6 +46,17 @@ elif case == "bad_recipient":
     os.environ["AGE_RECIPIENT"] = "no-es-un-receptor-age"
 elif case.startswith("failure_"):
     os.environ["STUB_FAIL"] = case.removeprefix("failure_")
+elif case == "env_multiline":
+    # .env con clave PEM multilinea entre comillas: solo los nombres salen.
+    # El encabezado se arma en tiempo de ejecucion para no dejar en el
+    # repositorio un marcador literal de clave privada (lo bloquea el guard).
+    cabecera = "-----BEGIN " + "PRIVATE KEY-----"
+    (kit / ".env").write_text(
+        "DUMMY_SECRET=valor-ficticio-no-real\n"
+        'CLAVE_PRIVADA="' + cabecera + "\n"
+        "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ==\n"
+        '"-----END PRIVATE KEY-----"\n'
+        "PUBLIC_URL=https://example.invalid\n")
 proc = call("backup.py")
 backup = next((kit / "backups").iterdir())
 manifest = json.loads((backup / "manifest.json").read_text())
@@ -60,13 +72,41 @@ if case == "no_recipient":
     assert not (backup / ".env").exists() and not (backup / "env.age").exists()
     assert not (backup / archive).exists()
     assert manifest["env_cifrado"] is False
+    # Sin receptor age no hay dump en claro: el respaldo lo declara excluido.
+    assert not (backup / dump).exists(), sorted(p.name for p in backup.iterdir())
+    assert not (backup / dump_en_claro).exists(), sorted(p.name for p in backup.iterdir())
+    assert sorted(manifest["excluidos"]) == ["content", "dump"] if ghost \
+        else sorted(manifest["excluidos"]) == ["dump", "files"], manifest["excluidos"]
     expect(call("check_backup.py", backup), 0)
+    sys.exit(0)
+if case == "env_multiline":
+    nombres = (backup / "env.vars").read_text()
+    assert "MIIEvQ" not in nombres, nombres
+    assert "PRIVATE KEY" not in nombres, nombres
+    assert nombres.split() == ["CLAVE_PRIVADA", "DUMMY_SECRET", "PUBLIC_URL"], nombres
+    expect(call("check_backup.py", backup), 0)
+    sys.exit(0)
+if case == "dump_encrypted":
+    # El dump viaja cifrado y descifra byte a byte al dump sintetico.
+    assert (backup / dump).exists(), sorted(p.name for p in backup.iterdir())
+    assert not (backup / dump_en_claro).exists(), sorted(p.name for p in backup.iterdir())
+    descifrado = subprocess.run(["age", "-d", "-i", os.environ["AGE_IDENTITY_FILE"]],
+                                input=(backup / dump).read_bytes(), capture_output=True)
+    assert descifrado.returncode == 0, descifrado.stderr
+    assert descifrado.stdout == Path(os.environ["STUB_DUMP_FILE"]).read_bytes()
+    expect(call("check_backup.py", backup), 0)
+    sys.exit(0)
+if case == "dump_clear":
+    # Un dump en claro dentro del respaldo se rechaza como material sensible.
+    (backup / dump_en_claro).write_bytes(b"-- dump en claro\n")
+    expect(call("check_backup.py", backup), 4)
     sys.exit(0)
 os.environ["STUB_RUNNING"] = "0"
 trace.write_text("")
 if case == "missing_dump":
     (backup / dump).rename(backup.parent / "removed-dump")
     manifest["sha256"].pop(dump)
+    manifest["excluidos"] = []
     save_manifest()
     expect(call("check_backup.py", backup), 2)
     expect(call(dbrestore, backup, "--confirmar", "CONFIRMAR_RESTAURACION"), 2)
@@ -75,6 +115,35 @@ elif case == "empty_dump":
     (backup / dump).write_bytes(b"")
     rehash(dump)
     expect(call("check_backup.py", backup), 2)
+elif case == "solo_env_vars":
+    # Un manifiesto que solo declara env.vars no es un respaldo verificable.
+    for nombre in list(manifest["sha256"]):
+        if nombre != "env.vars":
+            (backup / nombre).unlink()
+    manifest["sha256"] = {"env.vars": manifest["sha256"]["env.vars"]}
+    manifest["excluidos"] = []
+    save_manifest()
+    proc = call("check_backup.py", backup)
+    expect(proc, 2)
+    assert "obligatorios" in proc.stderr, proc.stderr
+elif case == "missing_volume":
+    # El volumen no está y no se declara su exclusion: no se restaura nada.
+    (backup / archive).unlink()
+    manifest["sha256"].pop(archive)
+    manifest["excluidos"] = []
+    save_manifest()
+    expect(call("check_backup.py", backup), 2)
+    expect(call(restore, backup, "--confirmar", "CONFIRMAR_RESTAURACION"), 2)
+    no_writes()
+elif case == "report_symlink":
+    # Un informe enlazado no puede sobrescribir un fichero de fuera.
+    victima = backup.parent / "victima-fuera.txt"
+    victima.write_text("contenido original\n")
+    (backup / "restore-report.json").symlink_to(victima)
+    proc = call(dbrestore, backup, "--confirmar", "CONFIRMAR_RESTAURACION")
+    assert proc.returncode != 0, (proc.stdout, proc.stderr)
+    assert victima.read_text() == "contenido original\n", victima.read_text()
+    no_writes()
 elif case == "nested_env":
     (backup / "nested").mkdir()
     (backup / "nested/.env").write_text("DUMMY_SECRET=valor-ficticio-no-real\n")
@@ -143,8 +212,10 @@ elif case == "restore_bytes":
     assert (capture / "restoredb.bin").read_bytes() == Path(os.environ["STUB_DUMP_FILE"]).read_bytes()
     with tarfile.open(capture / "restorefiles.bin") as tf:
         assert tf.extractfile("./data/demo.txt").read() == b"archivo sintetico\n"
-    records = [json.loads(line) for line in (kit / "logs/restore.log").read_text().splitlines()]
-    assert all(r["sha256"] == manifest["sha256"] for r in records), records
+    registros = [json.loads(line) for line in (kit / "logs/restore.log").read_text().splitlines()]
+    assert all(r["sha256"] == manifest["sha256"] for r in registros), registros
+    assert registros[-1]["resultado"] == "restaurado", registros
+    assert all("resultado" in r and "sha256" in r for r in registros), registros
     assert "valor-ficticio-no-real" not in (kit / "logs/restore.log").read_text()
 elif case == "nonempty_db":
     os.environ["STUB_PSQL_OUT"] = "1"
