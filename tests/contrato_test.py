@@ -11,10 +11,15 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 RAIZ = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(RAIZ / "scripts"))
 import respaldo_contrato as contrato  # noqa: E402
+
+# Receptor age ficticio: la prueba no cifra nada, solo comprueba que el
+# destino enlazado se rechaza antes de tocar el fichero de destino.
+RECEPTOR_FICTICIO = "age1" + "q" * 58
 
 
 class InformeSinSymlink(unittest.TestCase):
@@ -198,6 +203,107 @@ class TarHostil(unittest.TestCase):
     def test_acepta_tar_limpio(self):
         archivo = self._tar([("datos/demo.txt", "file", b"sintetico\n")])
         contrato.validar_tar(archivo)
+
+
+class ResiduosCierre(unittest.TestCase):
+    """Cierre de los residuos de la revision independiente.
+
+    N4: la auditoria nunca sigue un enlace simbolico (ni en logs/ ni en el log).
+    N5: el cifrado nunca aterriza en el destino de un enlace simbolico.
+    N3: un restore-report.json que el manifiesto no declara no pasa la
+    verificacion de un respaldo, pero el camino de restauracion (que lo
+    escribe despues del manifiesto) sigue funcionando.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _respaldo_minimo(self):
+        """Un respaldo minimo y coherente: env.vars, dump cifrado y manifiesto."""
+        (self.base / "env.vars").write_text("DUMMY_SECRET\n", encoding="utf-8")
+        (self.base / "dump.sql.age").write_bytes(b"cifrado sintetico\n")
+        digests = {nombre: contrato.sha256_archivo(self.base / nombre)
+                   for nombre in ("env.vars", "dump.sql.age")}
+        manifiesto = {"software": "kit", "version": "1.0", "database": "db",
+                      "sha256": digests, "status": "completed"}
+        (self.base / "manifest.json").write_text(json.dumps(manifiesto), encoding="utf-8")
+        return manifiesto
+
+    # --- N4: la auditoria no sigue enlaces simbolicos ---
+
+    def test_auditoria_rechaza_enlace_en_el_log(self):
+        victima = self.base / "victima.txt"
+        victima.write_text("contenido original\n", encoding="utf-8")
+        (self.base / "logs").mkdir()
+        (self.base / "logs" / "restore.log").symlink_to(victima)
+        with self.assertRaises(contrato.RespaldoError) as ctx:
+            contrato.auditar(self.base, operacion="restore", resultado="restaurado")
+        self.assertEqual(ctx.exception.codigo, 2)
+        self.assertEqual(victima.read_text(encoding="utf-8"), "contenido original\n")
+
+    def test_auditoria_rechaza_enlace_en_el_directorio_de_logs(self):
+        real = self.base / "real"
+        real.mkdir()
+        victima = real / "restore.log"
+        victima.write_text("contenido original\n", encoding="utf-8")
+        (self.base / "logs").symlink_to(real, target_is_directory=True)
+        with self.assertRaises(contrato.RespaldoError) as ctx:
+            contrato.auditar(self.base, operacion="restore", resultado="restaurado")
+        self.assertEqual(ctx.exception.codigo, 2)
+        self.assertEqual(victima.read_text(encoding="utf-8"), "contenido original\n")
+
+    def test_auditoria_anade_al_log_sin_romper_el_formato(self):
+        contrato.auditar(self.base, operacion="restore", kit="kit", resultado="restaurado")
+        contrato.auditar(self.base, operacion="restore", kit="kit", resultado="failed")
+        log = self.base / "logs" / "restore.log"
+        self.assertFalse(log.is_symlink())
+        lineas = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lineas), 2)
+        primero = json.loads(lineas[0])
+        self.assertEqual(primero["resultado"], "restaurado")
+        self.assertEqual(primero["kit"], "kit")
+        self.assertIn("ts", primero)
+        self.assertEqual(json.loads(lineas[1])["resultado"], "failed")
+        self.assertEqual(oct(log.stat().st_mode & 0o777), oct(0o600))
+
+    # --- N5: el cifrado no aterriza en el destino de un enlace ---
+
+    def test_cifrar_con_age_rechaza_enlace_en_el_destino(self):
+        victima = self.base / "victima.txt"
+        victima.write_text("contenido original\n", encoding="utf-8")
+        destino = self.base / "dump.sql.age"
+        destino.symlink_to(victima)
+        with mock.patch.object(contrato.shutil, "which", return_value="/usr/bin/age"):
+            with self.assertRaises(contrato.RespaldoError) as ctx:
+                contrato.cifrar_con_age(lambda flujo: None, destino, RECEPTOR_FICTICIO)
+        self.assertEqual(ctx.exception.codigo, 2)
+        self.assertEqual(victima.read_text(encoding="utf-8"), "contenido original\n")
+
+    # --- N3: el informe de restauracion no declarado no se cuela ---
+
+    def test_verificacion_rechaza_un_informe_no_declarado(self):
+        self._respaldo_minimo()
+        (self.base / "restore-report.json").write_text(
+            json.dumps({"resultado": "restaurado"}), encoding="utf-8")
+        with self.assertRaises(contrato.RespaldoError) as ctx:
+            contrato.ejecutar_check(self.base, "kit", "1.0", "db",
+                                    esperados=("env.vars", "dump.sql.age"))
+        self.assertEqual(ctx.exception.codigo, 2)
+        self.assertIn("restore-report.json", str(ctx.exception))
+
+    def test_el_informe_se_puede_escribir_tras_la_restauracion(self):
+        self._respaldo_minimo()
+        contrato.escribir_informe(self.base, software="kit", resultado="restaurado")
+        self.assertTrue((self.base / "restore-report.json").is_file())
+        # El camino de restauracion tolera su propio informe: lo escribe
+        # despues del manifiesto y todavia no puede declararlo.
+        contrato.ejecutar_check(self.base, "kit", "1.0", "db",
+                                esperados=("env.vars", "dump.sql.age"),
+                                permitir_informe_no_declarado=True)
 
 
 if __name__ == "__main__":

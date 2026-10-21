@@ -39,7 +39,8 @@ def main():
     origen = Path(origen).resolve()
     manifiesto = ejecutar_check(str(origen), SOFTWARE, VERSION, DATABASE,
                                 esperados=ESPERADOS, prohibidos=PROHIBIDOS,
-                                requeridos=("env.vars",), excluibles=EXCLUIBLES)
+                                requeridos=("env.vars",), excluibles=EXCLUIBLES,
+                                permitir_informe_no_declarado=True)
     if modo == "dry-run":
         print("Simulacion: el respaldo es integro y no se escribio nada.")
         print("Para restaurar de verdad: --confirmar CONFIRMAR_RESTAURACION")
