@@ -3,6 +3,9 @@
 
 El volumen viaja cifrado con age: la clave privada (AGE_IDENTITY_FILE) es un
 insumo externo, no se genera aqui. Exige destino vacio.
+
+El preflight completo (volumen presente, descifrado, tar valido, destino
+vacio) se ejecuta ANTES de extraer nada.
 """
 import os
 import subprocess
@@ -20,8 +23,9 @@ DATABASE = "postgresql"
 RAIZ = Path(__file__).resolve().parents[1]
 os.chdir(RAIZ)
 os.umask(0o077)
-PROHIBIDOS = ["files.tar.gz"]
-
+PROHIBIDOS = ["files.tar.gz", "public.dump"]
+ESPERADOS = ("env.vars", "public.dump.age", "files.tar.gz.age")
+EXCLUIBLES = {"dump": "public.dump.age", "files": "files.tar.gz.age"}
 
 
 def dc(*args, **kw):
@@ -32,7 +36,8 @@ def main():
     modo, origen = opciones_restore(sys.argv[1:])
     origen = Path(origen).resolve()
     manifiesto = ejecutar_check(str(origen), SOFTWARE, VERSION, DATABASE,
-                                prohibidos=PROHIBIDOS, requeridos=("public.dump", "env.vars"))
+                                esperados=ESPERADOS, prohibidos=PROHIBIDOS,
+                                requeridos=("env.vars",), excluibles=EXCLUIBLES)
     if modo == "dry-run":
         print("Simulacion: checksums integros; no demuestra descifrado ni recuperacion.")
         return 0

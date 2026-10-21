@@ -53,7 +53,7 @@ class NombresEnv(unittest.TestCase):
         # secretos del hook de commit). El contenido es sintetico.
         cabecera = "-----BEGIN " + "PRIVATE KEY-----"
         texto = ("DUMMY_SECRET=valor-ficticio-no-real\n"
-                 '"' + cabecera + "\n"
+                 'CLAVE_PRIVADA="' + cabecera + "\n"
                  "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ==\n"
                  '"-----END PRIVATE KEY-----"\n'
                  "PUBLIC_URL=https://example.invalid\n")
@@ -87,12 +87,16 @@ class ArtefactosObligatorios(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def manifiesto(self, nombres):
+    def manifiesto(self, nombres, excluidos=()):
         digests = {}
         for nombre in nombres:
             digests[nombre] = contrato.sha256_archivo(self.base / nombre)
-        return {"software": "kit", "version": "1.0", "database": "db",
-                "sha256": digests, "status": "completed"}
+        datos = {"software": "kit", "version": "1.0", "database": "db",
+                 "sha256": digests, "status": "completed"}
+        if excluidos:
+            datos["excluidos"] = list(excluidos)
+        (self.base / "manifest.json").write_text(json.dumps(datos), encoding="utf-8")
+        return datos
 
     def test_exige_declarar_los_artefactos_obligatorios(self):
         manifiesto = self.manifiesto(["env.vars"])
@@ -112,24 +116,29 @@ class ArtefactosObligatorios(unittest.TestCase):
             contrato.verificar_checksums(self.base, manifiesto, ())
 
     def test_ejecutar_check_exige_declarar_la_exclusion(self):
+        (self.base / "dump.sql.age").unlink()
         manifiesto = self.manifiesto(["env.vars"])
         with self.assertRaises(contrato.RespaldoError) as ctx:
-            contrato.ejecutar_check(self.base, "kit", "1.0", "db", esperados=("env.vars",),
+            contrato.ejecutar_check(self.base, "kit", "1.0", "db",
+                                    esperados=("env.vars", "dump.sql.age"),
                                     excluibles={"dump": "dump.sql.age"})
         self.assertEqual(ctx.exception.codigo, 2)
         self.assertIn("exclusion", str(ctx.exception))
+        self.assertIn("obligatorios", str(ctx.exception))
 
     def test_ejecutar_check_acepta_exclusion_declarada(self):
-        manifiesto = self.manifiesto(["env.vars"])
-        manifiesto["excluidos"] = ["dump"]
-        contrato.ejecutar_check(self.base, "kit", "1.0", "db", esperados=("env.vars",),
+        (self.base / "dump.sql.age").unlink()
+        manifiesto = self.manifiesto(["env.vars"], excluidos=["dump"])
+        contrato.ejecutar_check(self.base, "kit", "1.0", "db",
+                                esperados=("env.vars", "dump.sql.age"),
                                 excluibles={"dump": "dump.sql.age"})
 
     def test_ejecutar_check_rechaza_artefacto_vacio(self):
         (self.base / "dump.sql.age").write_bytes(b"")
         manifiesto = self.manifiesto(["env.vars", "dump.sql.age"])
         with self.assertRaises(contrato.RespaldoError) as ctx:
-            contrato.ejecutar_check(self.base, "kit", "1.0", "db", esperados=("env.vars",),
+            contrato.ejecutar_check(self.base, "kit", "1.0", "db",
+                                    esperados=("env.vars", "dump.sql.age"),
                                     excluibles={"dump": "dump.sql.age"})
         self.assertEqual(ctx.exception.codigo, 2)
 

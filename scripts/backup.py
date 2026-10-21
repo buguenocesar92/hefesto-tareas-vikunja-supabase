@@ -4,7 +4,10 @@
 Reglas de material sensible:
 - El .env nunca se copia en claro: solo env.vars y, si hay receptor age, el
   .env cifrado (env.age).
-- El volumen de archivos (adjuntos de tareas) es material personal: viaja cifrado con age o no viaja y el manifiesto lo declara.
+- El dump de la base (cuentas, correos y hashes de contrasena) y el volumen de
+  archivos (adjuntos de tareas) son material personal: viajan cifrados con age
+  o no viajan, y el manifiesto declara cada exclusion. Los permisos
+  restrictivos no son cifrado: no hay dump en claro en disco.
 Ver docs/CONTRATO-RESPALDO.md.
 """
 import datetime
@@ -42,14 +45,24 @@ def main():
                datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
     carpeta.mkdir(parents=True, mode=0o700)
     meta = {}
+    excluidos = []
     try:
         try:
             dc("stop", "app")
-            with (carpeta / "public.dump").open("wb") as out:
-                dc("run", "--rm", "--no-deps", "-T", "--entrypoint", "pg_dump", "dbtools",
-                   "--format=custom", "--schema=public", "--no-owner", "--no-acl", stdout=out)
-
             receptor = receptor_age()
+            if receptor:
+                # El dump va del productor a age: nunca toca el disco en claro.
+                cifrar_con_age(
+                    lambda flujo: dc("run", "--rm", "--no-deps", "-T", "--entrypoint", "pg_dump",
+                                     "dbtools", "--format=custom", "--schema=public",
+                                     "--no-owner", "--no-acl", stdout=flujo),
+                    carpeta / "public.dump.age", receptor)
+                meta["dump"] = "public.dump.age (cifrado con age)"
+            else:
+                meta["dump"] = ("excluido: el dump contiene cuentas, correos y hashes de "
+                                "contrasena y no hay receptor age configurado")
+                excluidos.append("dump")
+
             if receptor:
                 cifrar_con_age(
                     lambda flujo: dc("run", "--rm", "--no-deps", "-T", "--entrypoint", "tar",
@@ -58,20 +71,27 @@ def main():
                 meta["files"] = "files.tar.gz.age (cifrado con age)"
             else:
                 meta["files"] = ("excluido: el volumen de archivos contiene material personal "
-                                  "y no hay receptor age configurado")
+                                 "y no hay receptor age configurado")
+                excluidos.append("files")
 
             meta.update(exportar_env(RAIZ, carpeta))
             if (RAIZ / "compose.yaml").is_file():
                 shutil.copy2(RAIZ / "compose.yaml", carpeta / "compose.yaml")
         finally:
             dc("start", "app")
+        meta["excluidos"] = sorted(excluidos)
         artefactos = artefactos_presentes(carpeta)
         escribir_manifiesto(carpeta, SOFTWARE, VERSION, DATABASE, artefactos, extra=meta)
     except Exception:
         marcar_fallido(carpeta, SOFTWARE, VERSION, DATABASE)
         raise
     print("Respaldo completo:", carpeta)
-    print("El .env no viaja en claro: solo cifrado con age o fuera del respaldo.")
+    if excluidos:
+        print("ATENCION: el respaldo NO incluye " + ", ".join(excluidos) +
+              ": no es una copia de la base ni de los adjuntos. "
+              "Configura AGE_RECIPIENT (o SOPS_AGE_RECIPIENT) para respaldarlos.")
+    else:
+        print("El .env, el dump y los adjuntos no viajan en claro: todo cifrado con age.")
     return 0
 
 

@@ -8,6 +8,8 @@ Reglas que implementa:
 - El .env NUNCA se copia en claro: solo sus nombres (env.vars) y, si hay
   receptor age, el cifrado (env.age). Sin receptor, el respaldo sale sin el
   .env y el manifiesto lo declara. No hay modo degradado a texto plano.
+- El dump de la base y el volumen con material personal viajan cifrados con
+  age o no viajan: el manifiesto declara cada exclusion en "excluidos".
 - manifest.json lleva siempre software, version, database, sha256 y status.
 - check_backup devuelve 0 (integro), 1 (uso), 2 (integridad) o 4 (secreto en claro).
 - restore exige --confirmar CONFIRMAR_RESTAURACION, valida los sha256 antes de
@@ -30,6 +32,13 @@ from pathlib import Path, PurePosixPath
 CLAVES_MANIFIESTO = ("software", "version", "database", "sha256", "status")
 CONFIRMACION = "CONFIRMAR_RESTAURACION"
 VARS_RECIPIENTE = ("AGE_RECIPIENT", "SOPS_AGE_RECIPIENT")
+# Solo se acepta una linea con forma de asignacion: nombre + '='.
+ASIGNACION_ENV = re.compile(r"^(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]*=")
+# Un nombre de variable es corto y convencional; un fragmento base64 o PEM no.
+NOMBRE_ENV_LARGO = re.compile(r"^[A-Z][A-Z0-9_]*$")
+LARGO_NOMBRE_ENV = 32
+# env.vars puede estar vacio (kit sin .env); ningun otro artefacto.
+PUEDE_ESTAR_VACIO = ("env.vars",)
 
 
 class RespaldoError(Exception):
@@ -47,6 +56,29 @@ def ahora() -> str:
 def sha256_archivo(path) -> str:
     with Path(path).open("rb") as f:
         return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+def escribir_texto_seguro(destino, texto, modo=0o600):
+    """Escribe un fichero sin seguir enlaces simbolicos.
+
+    Un enlace en el destino permitiria sobrescribir cualquier fichero del
+    sistema (por ejemplo el .env del kit) sin alterar los checksums del
+    respaldo: el enlace se rechaza en vez de seguirlo.
+    """
+    destino = Path(destino)
+    if destino.is_symlink():
+        raise RespaldoError("No se escribe sobre un enlace simbolico: " + str(destino), 2)
+    if destino.exists() and not destino.is_file():
+        raise RespaldoError("El destino no es un fichero regular: " + str(destino), 2)
+    destino.write_text(texto, encoding="utf-8")
+    os.chmod(destino, modo)
+    return destino
+
+
+def escribir_json(destino, datos, modo=0o600):
+    """Escribe JSON sin seguir enlaces simbolicos."""
+    return escribir_texto_seguro(destino, json.dumps(datos, indent=2, ensure_ascii=False) + "\n",
+                                  modo)
 
 
 def artefactos_presentes(destino):
@@ -86,6 +118,40 @@ def receptor_age() -> str:
     return ""
 
 
+def nombres_env(texto) -> list:
+    """Nombres de variable de un .env, sin valores y sin continuaciones.
+
+    Solo se aceptan lineas con forma de asignacion valida. Las lineas de
+    continuacion (un valor multilinea entre comillas) se descartan: si no, un
+    fragmento de clave PEM o de base64 terminado en '=' acabaria en env.vars
+    y el respaldo filtraria parte del secreto.
+    """
+    nombres = []
+    en_valor = False
+    for linea in texto.splitlines():
+        limpia = linea.strip()
+        if not limpia or limpia.startswith("#"):
+            continue
+        if en_valor:
+            # Continuacion del valor multilinea: solo importa cerrar la comilla.
+            if '"' in limpia or "'" in limpia:
+                en_valor = False
+            continue
+        match = ASIGNACION_ENV.match(limpia)
+        if not match:
+            continue
+        nombre = match.group(1)
+        if len(nombre) > LARGO_NOMBRE_ENV and not NOMBRE_ENV_LARGO.match(nombre):
+            # Fragmento de base64 o PEM, no un nombre de variable.
+            continue
+        resto = limpia[match.end():]
+        if resto.count('"') % 2 == 1 or resto.count("'") % 2 == 1:
+            en_valor = True
+        if nombre not in nombres:
+            nombres.append(nombre)
+    return sorted(nombres)
+
+
 def exportar_env(root, destino) -> dict:
     """Escribe env.vars (nombres) y, si hay receptor age, env.age (cifrado).
 
@@ -96,17 +162,11 @@ def exportar_env(root, destino) -> dict:
     destino = Path(destino)
     origen = root / ".env"
     if not origen.is_file():
-        (destino / "env.vars").write_text("", encoding="utf-8")
+        escribir_texto_seguro(destino / "env.vars", "")
         return {"env": "env.vars", "env_vars": 0, "env_cifrado": False,
                 "env_nota": "el kit no tiene .env"}
-    nombres = []
-    for linea in origen.read_text(encoding="utf-8", errors="replace").splitlines():
-        texto = linea.strip()
-        if not texto or texto.startswith("#") or "=" not in texto:
-            continue
-        nombres.append(texto.split("=", 1)[0].strip())
-    unicos = sorted(set(n for n in nombres if n))
-    (destino / "env.vars").write_text("\n".join(unicos) + ("\n" if unicos else ""), encoding="utf-8")
+    unicos = nombres_env(origen.read_text(encoding="utf-8", errors="replace"))
+    escribir_texto_seguro(destino / "env.vars", "\n".join(unicos) + ("\n" if unicos else ""))
     meta = {"env": "env.vars", "env_vars": len(unicos), "env_cifrado": False}
     receptor = receptor_age()
     if not receptor:
@@ -115,7 +175,10 @@ def exportar_env(root, destino) -> dict:
     if shutil.which("age") is None:
         raise RespaldoError("age no esta disponible y hay receptor configurado: "
                             "no hay modo degradado en claro", 5)
-    proc = subprocess.run(["age", "-r", receptor, "-o", str(destino / "env.age")],
+    destino_age = destino / "env.age"
+    if destino_age.is_symlink():
+        raise RespaldoError("No se escribe sobre un enlace simbolico: " + str(destino_age), 2)
+    proc = subprocess.run(["age", "-r", receptor, "-o", str(destino_age)],
                           input=origen.read_bytes(), capture_output=True)
     if proc.returncode != 0:
         detalle = proc.stderr.decode("utf-8", "replace").strip()
@@ -172,8 +235,7 @@ def marcar_fallido(destino, software, version, database):
     manifiesto = {"software": software, "version": version, "database": database,
                   "sha256": {}, "status": "failed",
                   "failed_at": ahora()}
-    (destino / "manifest.json").write_text(
-        json.dumps(manifiesto, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    escribir_json(destino / "manifest.json", manifiesto)
     return manifiesto
 
 
@@ -190,8 +252,7 @@ def escribir_manifiesto(destino, software, version, database, artefactos, extra=
     }
     if extra:
         manifiesto.update(extra)
-    (destino / "manifest.json").write_text(
-        json.dumps(manifiesto, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    escribir_json(destino / "manifest.json", manifiesto)
     return manifiesto
 
 
@@ -215,15 +276,23 @@ def leer_manifiesto(destino):
     return datos
 
 
-def verificar_checksums(destino, manifiesto=None, esperados=None):
-    """Comprueba sha256 de cada artefacto del manifiesto."""
+def verificar_checksums(destino, manifiesto=None, esperados=()):
+    """Comprueba sha256 de cada artefacto del manifiesto.
+
+    esperados son los artefactos obligatorios: el manifiesto tiene que
+    declararlos siempre. Sin ellos el respaldo no es comprobable.
+    """
     destino = Path(destino).resolve()
     manifiesto = manifiesto or leer_manifiesto(destino)
     digests = manifiesto.get("sha256")
     if not isinstance(digests, dict) or not digests:
         raise RespaldoError("manifest.json sin sha256 de artefactos", 2)
-    if esperados is not None and set(digests) != set(esperados):
-        raise RespaldoError("Lista de artefactos inesperada en el manifiesto", 2)
+    if not esperados:
+        raise RespaldoError("El contrato exige declarar los artefactos obligatorios", 2)
+    faltantes = sorted(set(esperados) - set(digests))
+    if faltantes:
+        raise RespaldoError("El manifiesto no declara los artefactos obligatorios: "
+                            + ", ".join(faltantes), 2)
     for nombre, digest in digests.items():
         ruta = PurePosixPath(nombre)
         if (not nombre or ruta.is_absolute() or ".." in ruta.parts or "\\" in nombre
@@ -277,10 +346,16 @@ def detectar_secreto_en_claro(destino):
     return None
 
 
-def ejecutar_check(destino, software, version, database, esperados=None, prohibidos=(),
-                   requeridos=()):
+def ejecutar_check(destino, software, version, database, esperados, prohibidos=(),
+                   requeridos=(), excluibles=()):
     """Verificacion completa de un respaldo. Lanza RespaldoError con su codigo.
 
+    esperados: artefactos que produce el kit. Cada uno tiene que estar en el
+      manifiesto o su exclusion tiene que estar declarada en "excluidos": un
+      manifiesto que solo declara env.vars no es un respaldo verificable.
+    requeridos: artefactos que ademas no pueden estar vacios.
+    excluibles: {clave del manifiesto: artefacto} que puede faltar solo si el
+      manifiesto declara esa exclusion en "excluidos".
     prohibidos: nombres de archivo que no pueden estar en claro en el respaldo
     (por ejemplo el volumen de configuracion de un servicio con token de API).
     """
@@ -297,13 +372,33 @@ def ejecutar_check(destino, software, version, database, esperados=None, prohibi
     for nombre in prohibidos:
         if (destino / nombre).exists():
             raise RespaldoError("El respaldo contiene material sensible en claro: " + nombre, 4)
-    verificar_checksums(destino, manifiesto, esperados)
+    declarados = set(manifiesto.get("sha256") or {})
+    excluidos = manifiesto.get("excluidos") or []
+    if not isinstance(excluidos, list):
+        raise RespaldoError("El manifiesto declara 'excluidos' en un formato no admitido", 2)
+    mapa = dict(excluibles)
+    for clave, artefacto in mapa.items():
+        if clave in excluidos and artefacto in declarados:
+            raise RespaldoError("El manifiesto declara excluido " + artefacto +
+                                " pero lo incluye en el respaldo", 2)
+    excluidos_artefactos = {artefacto for clave, artefacto in mapa.items() if clave in excluidos}
+    obligatorios = [nombre for nombre in esperados if nombre not in excluidos_artefactos]
+    if not obligatorios:
+        raise RespaldoError("El kit no declara ningun artefacto obligatorio", 2)
+    faltan = [nombre for nombre in obligatorios if nombre not in declarados]
+    if faltan:
+        raise RespaldoError("El manifiesto no declara los artefactos obligatorios: "
+                            + ", ".join(faltan) + " (y no declara su exclusion)", 2)
+    verificar_checksums(destino, manifiesto, obligatorios)
     verificar_cobertura(destino, manifiesto)
     for nombre in requeridos:
-        if nombre not in manifiesto["sha256"]:
+        if nombre not in declarados:
             raise RespaldoError("Falta artefacto requerido: " + nombre, 2)
-        if nombre.endswith((".sql", ".dump")) and (destino / nombre).stat().st_size == 0:
-            raise RespaldoError("Dump vacio: " + nombre, 2)
+    for nombre in sorted(declarados):
+        if nombre in PUEDE_ESTAR_VACIO:
+            continue
+        if (destino / nombre).stat().st_size == 0:
+            raise RespaldoError("Artefacto vacio: " + nombre, 2)
     return manifiesto
 
 
@@ -359,11 +454,14 @@ def auditar(root, **campos):
 
 
 def escribir_informe(carpeta, **campos):
-    """Informe de restauracion junto al respaldo."""
+    """Informe de restauracion junto al respaldo.
+
+    El informe nunca se escribe siguiendo un enlace simbolico: un enlace en
+    el respaldo permitiria sobrescribir cualquier fichero del sistema.
+    """
     destino = Path(carpeta)
     informe = {"ts": ahora(), **campos}
-    (destino / "restore-report.json").write_text(
-        json.dumps(informe, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    escribir_json(destino / "restore-report.json", informe)
     return informe
 
 

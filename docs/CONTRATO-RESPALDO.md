@@ -3,8 +3,8 @@
 Este documento es **normativo** para el kit `hefesto-tareas`. Los kits que no lo
 cumplan quedan fuera del flujo orquestado: el mismo documento esta en
 `hefesto-monitor-uptime-kuma` (el que produce el respaldo) y en
-`hefesto-respaldo-kopia` (el que lo almacena), para que ambos extremos hablen
-el mismo idioma.
+`hefesto-respaldo-kopia` (el que lo almacena), para que ambos extremos hablen el
+mismo idioma.
 
 ## 1. Las reglas
 
@@ -13,7 +13,7 @@ el mismo idioma.
    contenido del respaldo, no por el nombre.
 2. **Salida en `<timestamp>/`** con, como minimo:
    - el dump de la base de datos y/o los tar de los volumenes con material
-     personal;
+     personal, **cifrados con `age`**;
    - `env.vars`: los nombres de las variables del `.env`, sin valores;
    - `manifest.json`: la metadata del respaldo.
 3. **`manifest.json` contiene SIEMPRE** estas claves: `software`, `version`,
@@ -25,30 +25,44 @@ el mismo idioma.
 5. **El `.env` NUNCA se copia en claro.** Se documenta su ausencia en el
    manifiesto o se cifra con `age` usando la clave publica del receptor. Un
    `.env` en claro dentro de un respaldo es una credencial tendida en el disco
-   donde aterriza el respaldo.
-6. **El material personal (volumenes de archivos) solo viaja cifrado con
-   `age`** (`files.tar.gz.age`). Su version en claro esta en la lista de
+   donde aterriza el respaldo. `env.vars` solo lleva **nombres de variable
+   validos**: una linea de continuacion (un valor multilinea entre comillas) no
+   es una variable y no puede aparecer ahi, porque filtraria parte del secreto.
+6. **El dump de la base y el material personal (volumenes de archivos) solo
+   viajan cifrados con `age`** (`public.dump.age` y `files.tar.gz.age`). Sus
+   versiones en claro (`public.dump` y `files.tar.gz`) estan en la lista de
    prohibidos de `scripts/check_backup.py` y el respaldo se rechaza con codigo
-   4 si aparece.
-7. **Existe un script de restauracion** que valida, en este orden: el
-   `manifest.json` (version y `status`), el checksum, las rutas dentro del tar
-   (nada absoluto, nada con `..`, nada que no sea archivo o directorio) y que el
-   **volumen destino este vacio**. Nunca vacia ni sobrescribe datos existentes.
-8. **La restauracion es explicita**: sin `--confirmar CONFIRMAR_RESTAURACION`
+   4 si aparecen. Los permisos restrictivos no son cifrado.
+7. **El manifiesto declara el contenido del respaldo**: siempre los artefactos
+   obligatorios (`env.vars`) y, para cada artefacto opcional, o su presencia o
+   su exclusion explicita en la lista `excluidos`. Un manifiesto que solo
+   declara `env.vars` no es un respaldo verificable y se rechaza con codigo 2.
+8. **Existe un script de restauracion** que valida, en este orden: el
+   `manifest.json` (version y `status`), el checksum, los artefactos
+   obligatorios y las exclusiones declaradas, las rutas dentro del tar (nada
+   absoluto, nada con `..`, nada duplicado, nada que no sea archivo o directorio)
+   y que el **volumen destino este vacio**. El preflight se completa **antes**
+   de tocar la base o los volumenes: si el preflight falla, no se escribe nada.
+   Nunca vacia ni sobrescribe datos existentes.
+9. **La restauracion es explicita**: sin `--confirmar CONFIRMAR_RESTAURACION`
    no se escribe nada (codigo 3); `--dry-run` simula y no escribe.
-9. **Existe una prueba bats** que ejercita el ciclo completo con **datos
-   sinteticos** y en aislamiento: ningun contenedor real, ningun volumen real.
-10. **Existe un `.env.example` sin secretos** que documenta todas las variables
+10. **El informe de restauracion (`restore-report.json`) nunca se escribe
+    siguiendo un enlace simbolico**: un enlace en el respaldo permitiria
+    sobrescribir cualquier fichero del sistema sin alterar los checksums.
+11. **Existe una prueba bats** que ejercita el ciclo completo con **datos
+    sinteticos** y en aislamiento: ningun contenedor real, ningun volumen real.
+12. **Existe un `.env.example` sin secretos** que documenta todas las variables
     que el compose exige.
-11. **`gitleaks` corre en CI** sobre el repositorio y sobre el historial.
-12. **El compose fija la imagen por digest**, no por etiqueta: una etiqueta
+13. **`gitleaks` corre en CI** sobre el repositorio y sobre el historial.
+14. **El compose fija la imagen por digest**, no por etiqueta: una etiqueta
     puede cambiar de contenido sin que nadie lo note.
-13. **El estado de despliegue no viaja en el repositorio**: los identificadores
+15. **El estado de despliegue no viaja en el repositorio**: los identificadores
     (uuid de la app, url publica, fechas) viven en un archivo de estado con
     permisos restrictivos, fuera del control de versiones.
-14. **Cada restauracion deja rastro de auditoria**: origen, sha256 verificado,
+16. **Cada restauracion deja rastro de auditoria**: origen, sha256 verificado,
     destino y resultado, en un log append-only (`logs/restore.log`). Sin
-    valores de secretos: solo nombres y hashes.
+    valores de secretos: solo nombres y hashes. Tambien quedan registrados los
+    intentos fallidos.
 
 ## 2. Por que el `.env` no se copia en claro
 
@@ -66,7 +80,21 @@ Lo que si puede viajar, y asi viaja:
 Si no hay receptor age, el respaldo sale **sin** el `.env` y el manifiesto lo
 dice. No hay modo degradado a texto plano.
 
-## 3. El receptor `age`: quien custodia la clave
+## 3. Por que el dump tambien viaja cifrado
+
+El dump de la base contiene cuentas, correos y hashes de contrasena. Un
+respaldo vive en el disco, se copia a otro equipo y sube a un bucket: si el
+dump viaja en claro, cada copia es una copia de los datos personales de los
+titulares (Ley 21.719).
+
+Por eso el dump se cifra con el mismo receptor age que el volumen de
+contenido. El dump se produce directamente en el cifrador: **el texto plano
+nunca se escribe en disco**. Sin receptor age, el dump no viaja y el
+manifiesto lo declara en `excluidos`; el respaldo sale sin el y el operador
+tiene que(configurar `AGE_RECIPIENT` (o `SOPS_AGE_RECIPIENT`) para tener una
+copia de la base.
+
+## 4. El receptor `age`: quien custodia la clave
 
 La clave publica del receptor es un **insumo externo**. La privada vive en el
 gestor de secretos del cliente (Infisical, Vaultwarden) o, si el cliente no
@@ -80,7 +108,7 @@ Consecuencias que hay que aceptar antes de cifrar:
 - **Rotar la clave obliga a volver a cifrar**: los respaldos viejos siguen
   ligados a la clave con que se hicieron.
 
-## 4. Migrar respaldos que ya existen
+## 5. Migrar respaldos que ya existen
 
 Los respaldos hechos antes de este contrato **no se tocan**. La migracion es
 manual, archivo por archivo, y nunca borra el original:
@@ -92,7 +120,7 @@ manual, archivo por archivo, y nunca borra el original:
 Un respaldo viejo sin cifrar es un riesgo asumido y conocido: esta en el punto
 5 del contrato como deuda.
 
-## 5. Como se verifica el contrato
+## 6. Como se verifica el contrato
 
 ```bash
 bats tests/                      # la suite del kit que respalda
