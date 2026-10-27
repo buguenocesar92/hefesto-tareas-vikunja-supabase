@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Stub de docker para las suites bats de este kit.
+#
+# Solo existe dentro de una suite: fuera de ella falla cerrado (97) y no llama
+# a Docker. Los datos que entrega son sinteticos y los fija el entorno:
+#   STUB_RUNNING=1|0     el servicio aparece activo o no
+#   STUB_DUMP_FILE       contenido del dump de base de datos
+#   STUB_TAR_DIR         directorio que se empaqueta como tar.gz
+#   STUB_FIND_OUTPUT     salida del "find" que valida el destino vacio
+#   STUB_PSQL_OUT        respuesta de la consulta que cuenta tablas
+#   STUB_COMPOSE_CONFIG  JSON de "docker compose config --format json"
+#   STUB_STATE_FILE      archivo con los servicios detenidos (stop/start)
+set -uo pipefail
+
+if [ "${HEFESTO_KIT_TEST:-}" != "1" ]; then
+  printf 'tests/stubs/docker: fuera de una suite (falta HEFESTO_KIT_TEST=1); no se llama a Docker.\n' >&2
+  exit 97
+fi
+
+pos=""
+entrada=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --entrypoint) entrada="${2:-}"; shift 2; continue ;;
+    --project-directory|--project-name|-f|--file|-p|--env-file|--workdir|--profile|--user|--mount) shift 2; continue ;;
+    --rm|--no-deps|-T|-d|--detach|-it|-i|--quiet) shift; continue ;;
+    *) pos="$pos $1"; shift ;;
+  esac
+done
+
+# La invocacion real es "docker compose ...": se ignoran esos dos prefijos.
+set -- $pos
+while [ $# -gt 0 ]; do
+  case "$1" in
+    docker|compose) shift ;;
+    *) break ;;
+  esac
+done
+comando="${1:-}"
+shift || true
+resto="$*"
+
+case "$comando" in
+  version)
+    printf 'Docker Compose version v2.29.7 (stub)\n'
+    exit 0
+    ;;
+  config)
+    if [ -n "${STUB_COMPOSE_CONFIG:-}" ] && [ -f "$STUB_COMPOSE_CONFIG" ]; then
+      cat "$STUB_COMPOSE_CONFIG"
+    else
+      printf '{"services":{"app":{"image":"stub-image:latest"}},"volumes":{}}\n'
+    fi
+    exit 0
+    ;;
+  volume)
+    exit 0
+    ;;
+  ps)
+    case "$resto" in
+      *-q*)
+        svc="${resto##* }"
+        if [ -n "${STUB_STATE_FILE:-}" ] && grep -qx "$svc" "$STUB_STATE_FILE" 2>/dev/null; then
+          : # el servicio esta detenido
+        elif [ "${STUB_RUNNING:-1}" = "1" ]; then
+          printf 'stubcontainer0001\n'
+        fi
+        ;;
+      *) if [ "${STUB_RUNNING:-1}" = "1" ]; then printf 'NAME   STATUS\nstub   running\n'; fi ;;
+    esac
+    exit 0
+    ;;
+  stop)
+    if [ -n "${STUB_STATE_FILE:-}" ]; then
+      printf '%s\n' "${resto##* }" >> "$STUB_STATE_FILE"
+    fi
+    exit 0
+    ;;
+  start)
+    if [ -n "${STUB_STATE_FILE:-}" ] && [ -f "$STUB_STATE_FILE" ]; then
+      grep -v -x "${resto##* }" "$STUB_STATE_FILE" > "$STUB_STATE_FILE.tmp" 2>/dev/null || true
+      mv "$STUB_STATE_FILE.tmp" "$STUB_STATE_FILE"
+    fi
+    exit 0
+    ;;
+  kill|rm|pull|up|down|restart|wait|logs|top|port|build) exit 0 ;;
+  exec)
+    case "$resto" in
+      *"occ status"*) printf '{"installed":true,"maintenance":false,"needsDbUpgrade":false,"version":"0.0.0"}\n'; exit 0 ;;
+      *"occ maintenance"*) exit 0 ;;
+      *information_schema.tables*|*"pg_tables"*)
+        printf '%s\n' "${STUB_PSQL_OUT:-0}"
+        exit 0
+        ;;
+      *)
+        if [ -n "${STUB_DUMP_FILE:-}" ] && [ -f "$STUB_DUMP_FILE" ]; then
+          cat "$STUB_DUMP_FILE"
+        fi
+        exit 0
+        ;;
+    esac
+    ;;
+  run)
+    case "$entrada" in
+      tar)
+        dir="${STUB_TAR_DIR:-}"
+        if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+          printf 'stub docker: falta STUB_TAR_DIR para el tar sintetico\n' >&2
+          exit 1
+        fi
+        tar -czf - -C "$dir" .
+        ;;
+      find)
+        if [ -n "${STUB_FIND_OUTPUT:-}" ]; then
+          printf '%s\n' "$STUB_FIND_OUTPUT"
+        fi
+        ;;
+      pg_dump)
+        if [ -n "${STUB_DUMP_FILE:-}" ] && [ -f "$STUB_DUMP_FILE" ]; then
+          cat "$STUB_DUMP_FILE"
+        fi
+        ;;
+      pg_restore)
+        case "$resto" in
+          *--list*) printf -- '--\n-- PostgreSQL database dump\n--\n' ;;
+        esac
+        ;;
+      psql)
+        printf '%s\n' "${STUB_PSQL_OUT:-0}"
+        ;;
+      sqlite3)
+        printf '%s\n' "${STUB_SQLITE_OUT:-}"
+        ;;
+      *) : ;;
+    esac
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
